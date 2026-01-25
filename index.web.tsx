@@ -122,6 +122,8 @@ const CreateAppWithFonts = () => {
   return <CreateApp />;
 
 }
-LoadSkiaWeb().then(async () => {
+LoadSkiaWeb({
+  locateFile: (file) => `/${file}`,
+}).then(async () => {
   renderRootComponent(CreateAppWithFonts)
 });

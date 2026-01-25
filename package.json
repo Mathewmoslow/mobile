@@ -3,7 +3,7 @@
   "main": "index",
   "version": "1.0.0",
   "scripts": {
-    "postinstall": "patch-package",
+    "postinstall": "patch-package && node ./node_modules/@shopify/react-native-skia/scripts/setup-canvaskit.js",
     "dev": "expo start",
     "build": "expo export --platform web",
     "start": "expo start",
