@@ -1,0 +1,56 @@
+{
+  "env": {
+    "GITHUB_TOKEN": "${GITHUB_TOKEN}",
+    "VERCEL_TOKEN": "${VERCEL_TOKEN}"
+  },
+  "commands": [
+    {
+      "name": "dev",
+      "cmd": "npm run dev"
+    },
+    {
+      "name": "build",
+      "cmd": "npm run build"
+    },
+    {
+      "name": "start",
+      "cmd": "npm run start"
+    },
+    {
+      "name": "migrate",
+      "cmd": "npm run db:migrate"
+    },
+    {
+      "name": "seed",
+      "cmd": "npm run db:seed"
+    },
+    {
+      "name": "sync_repo",
+      "cmd": "node ./scripts/sync-repo.js --repo <owner/repo> --vercel <vercelProjectId>"
+    },
+    {
+      "name": "fetch_commits",
+      "cmd": "node ./scripts/fetch-commits.js --repo <owner/repo>"
+    },
+    {
+      "name": "fetch_deployments",
+      "cmd": "node ./scripts/fetch-deployments.js --projectId <vercelProjectId>"
+    },
+    {
+      "name": "compare_commits",
+      "cmd": "node ./scripts/compare-commits.js --repo <owner/repo> --a <commitShaA> --b <commitShaB>"
+    },
+    {
+      "name": "analyze_diff",
+      "cmd": "node ./scripts/analyze-diff.js --comparisonId <comparisonId> --out ./analysis/<comparisonId>.json"
+    },
+    {
+      "name": "confirm_removal",
+      "cmd": "node ./scripts/confirm-removal.js --comparisonId <comparisonId> --file <path> --confirm <true|false>"
+    },
+    {
+      "name": "export_ai",
+      "cmd": "node ./scripts/export-ai.js --comparisonId <comparisonId> --out ./exports/<comparisonId>.json"
+    }
+  ]
+}

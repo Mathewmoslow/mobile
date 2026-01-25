@@ -3,7 +3,19 @@
   "main": "index",
   "version": "1.0.0",
   "scripts": {
-    "postinstall": "patch-package"
+    "postinstall": "patch-package",
+    "dev": "expo start",
+    "build": "expo export --platform web",
+    "start": "expo start",
+    "db:migrate": "node ./scripts/db-migrate.js",
+    "db:seed": "node ./scripts/db-seed.js",
+    "sync_repo": "node ./scripts/sync-repo.js",
+    "fetch_commits": "node ./scripts/fetch-commits.js",
+    "fetch_deployments": "node ./scripts/fetch-deployments.js",
+    "compare_commits": "node ./scripts/compare-commits.js",
+    "analyze_diff": "node ./scripts/analyze-diff.js",
+    "confirm_removal": "node ./scripts/confirm-removal.js",
+    "export_ai": "node ./scripts/export-ai.js"
   },
   "dependencies": {
     "@expo-google-fonts/dev": "^0.4.7",
@@ -101,4 +113,3 @@
   },
   "private": true
 }
-
