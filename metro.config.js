@@ -86,7 +86,12 @@ config.resolver.resolveRequest = (context, moduleName, platform) => {
   }
 };
 
-const cacheDir = path.join(__dirname, 'caches');
+const cacheDir = process.env.METRO_CACHE_DIR || path.join(__dirname, 'caches');
+try {
+  fs.mkdirSync(cacheDir, { recursive: true });
+} catch (error) {
+  // If the cache dir is not writable, Metro will fall back to in-memory cache.
+}
 
 config.cacheStores = () => [
   new FileStore({
