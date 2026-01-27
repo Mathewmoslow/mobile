@@ -71,11 +71,11 @@ export default function Index() {
         </Text>
 
         <View style={styles.field}>
-          <Text style={styles.label}>Repo path</Text>
+          <Text style={styles.label}>Repo (owner/repo)</Text>
           <TextInput
             value={repoPath}
             onChangeText={setRepoPath}
-            placeholder="/path/to/repo or owner/repo"
+            placeholder="owner/repo"
             autoCapitalize="none"
             autoCorrect={false}
             style={styles.input}
