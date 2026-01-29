@@ -129,6 +129,10 @@ function buildReport({ repo, featureBranch, baseBranch, baseOnly, featureOnly, c
 }
 
 module.exports = async (req, res) => {
+  if (req.method === 'OPTIONS') {
+    res.status(200).end();
+    return;
+  }
   if (req.method !== 'POST') {
     res.status(405).json({ error: 'Use POST' });
     return;
