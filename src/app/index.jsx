@@ -18,6 +18,7 @@ export default function Index() {
   const [featureBranch, setFeatureBranch] = useState('');
   const [baseBranch, setBaseBranch] = useState(DEFAULT_BASE_BRANCH);
   const [commitCount, setCommitCount] = useState(DEFAULT_COMMIT_COUNT);
+  const [includeHistory, setIncludeHistory] = useState(true);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState('');
   const [report, setReport] = useState('');
@@ -48,6 +49,7 @@ export default function Index() {
           featureBranch: featureBranch.trim(),
           baseBranch: baseBranch.trim() || DEFAULT_BASE_BRANCH,
           commitCount: Number.parseInt(commitCount, 10),
+          includeHistory,
         }),
       });
       const text = await response.text();
@@ -118,6 +120,16 @@ export default function Index() {
         </View>
 
         <TouchableOpacity
+          style={styles.toggleRow}
+          onPress={() => setIncludeHistory((prev) => !prev)}
+        >
+          <View style={[styles.toggle, includeHistory && styles.toggleActive]}>
+            <View style={[styles.toggleKnob, includeHistory && styles.toggleKnobActive]} />
+          </View>
+          <Text style={styles.toggleLabel}>Include main history audit</Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity
           style={[styles.button, (!isFormValid || isSubmitting) && styles.buttonDisabled]}
           onPress={handleSubmit}
           disabled={!isFormValid || isSubmitting}
@@ -172,6 +184,36 @@ const styles = StyleSheet.create({
     paddingVertical: 10,
     fontSize: 14,
     backgroundColor: '#fafafa',
+  },
+  toggleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  toggle: {
+    width: 46,
+    height: 26,
+    borderRadius: 13,
+    backgroundColor: '#e5e5e5',
+    padding: 3,
+  },
+  toggleActive: {
+    backgroundColor: '#111',
+  },
+  toggleKnob: {
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    backgroundColor: '#fff',
+    alignSelf: 'flex-start',
+  },
+  toggleKnobActive: {
+    alignSelf: 'flex-end',
+  },
+  toggleLabel: {
+    fontSize: 14,
+    color: '#222',
+    fontWeight: '500',
   },
   button: {
     backgroundColor: '#111',

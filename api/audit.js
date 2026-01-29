@@ -1,5 +1,6 @@
 const DEFAULT_COMMIT_COUNT = 100;
 const MAX_COMMITS = 200;
+const MAX_HISTORY_COMPARES = 30;
 
 function normalizeRepo(input) {
   if (!input) return null;
@@ -47,6 +48,24 @@ async function fetchCommits({ repo, branch, perPage, token }) {
   return all;
 }
 
+async function fetchCompare({ repo, base, head, token }) {
+  const url = `https://api.github.com/repos/${repo}/compare/${encodeURIComponent(
+    base
+  )}...${encodeURIComponent(head)}`;
+  const response = await fetch(url, {
+    headers: {
+      Accept: 'application/vnd.github+json',
+      Authorization: `Bearer ${token}`,
+      'User-Agent': 'vercel-audit-endpoint',
+    },
+  });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`GitHub compare error (${response.status}): ${text}`);
+  }
+  return response.json();
+}
+
 function formatCommit(commit) {
   const sha = commit.sha?.slice(0, 7) || 'unknown';
   const message = commit.commit?.message?.split('\n')[0] || 'no message';
@@ -55,7 +74,30 @@ function formatCommit(commit) {
   return `${sha} ${message} (${author}${date ? ` • ${date}` : ''})`;
 }
 
-function buildReport({ repo, featureBranch, baseBranch, baseOnly, featureOnly, count }) {
+function buildHistoryReport({ baseBranch, history, comparedCount, totalPairs }) {
+  const lines = [];
+  lines.push('Main Branch History Audit');
+  lines.push(`Branch: ${baseBranch}`);
+  lines.push(`Compared pairs: ${comparedCount}/${totalPairs}`);
+  lines.push('');
+  if (history.length === 0) {
+    lines.push('No deletions detected in compared pairs.');
+    return lines.join('\n');
+  }
+  history.forEach((entry) => {
+    lines.push(`Pair: ${entry.headSha} -> ${entry.baseSha}`);
+    if (entry.removedFiles.length === 0) {
+      lines.push('- No removed files detected.');
+    } else {
+      lines.push('- Removed files:');
+      entry.removedFiles.forEach((file) => lines.push(`  - ${file}`));
+    }
+    lines.push('');
+  });
+  return lines.join('\n');
+}
+
+function buildReport({ repo, featureBranch, baseBranch, baseOnly, featureOnly, count, historyReport }) {
   const lines = [];
   lines.push('COMMIT AUDIT REPORT');
   lines.push('');
@@ -77,6 +119,12 @@ function buildReport({ repo, featureBranch, baseBranch, baseOnly, featureOnly, c
   } else {
     featureOnly.forEach((commit) => lines.push(`- ${formatCommit(commit)}`));
   }
+  if (historyReport) {
+    lines.push('');
+    lines.push('---');
+    lines.push('');
+    lines.push(historyReport);
+  }
   return lines.join('\n');
 }
 
@@ -96,27 +144,62 @@ module.exports = async (req, res) => {
   const repo = normalizeRepo(body.repoPath || body.repo);
   const featureBranch = String(body.featureBranch || '').trim();
   const baseBranch = String(body.baseBranch || 'main').trim();
+  const includeHistory = Boolean(body.includeHistory);
   const count = Math.min(
     MAX_COMMITS,
     Number.isFinite(Number(body.commitCount)) ? Number(body.commitCount) : DEFAULT_COMMIT_COUNT
   );
 
-  if (!repo || !featureBranch || !baseBranch) {
-    res.status(400).json({ error: 'repo, featureBranch, and baseBranch are required.' });
+  if (!repo || !baseBranch) {
+    res.status(400).json({ error: 'repo and baseBranch are required.' });
     return;
   }
 
   try {
-    const [baseCommits, featureCommits] = await Promise.all([
-      fetchCommits({ repo, branch: baseBranch, perPage: count, token }),
-      fetchCommits({ repo, branch: featureBranch, perPage: count, token }),
-    ]);
+    const baseCommits = await fetchCommits({ repo, branch: baseBranch, perPage: count, token });
+    const featureCommits = featureBranch
+      ? await fetchCommits({ repo, branch: featureBranch, perPage: count, token })
+      : [];
 
     const featureSet = new Set(featureCommits.map((c) => c.sha));
     const baseSet = new Set(baseCommits.map((c) => c.sha));
 
     const baseOnly = baseCommits.filter((commit) => !featureSet.has(commit.sha));
     const featureOnly = featureCommits.filter((commit) => !baseSet.has(commit.sha));
+
+    let historyReport = '';
+    if (includeHistory) {
+      const history = [];
+      const totalPairs = Math.max(0, baseCommits.length - 1);
+      const compareCount = Math.min(totalPairs, MAX_HISTORY_COMPARES);
+      for (let i = 0; i < compareCount; i += 1) {
+        const head = baseCommits[i];
+        const base = baseCommits[i + 1];
+        const compare = await fetchCompare({
+          repo,
+          base: base.sha,
+          head: head.sha,
+          token,
+        });
+        const removedFiles = (compare.files || [])
+          .filter((file) => file.status === 'removed')
+          .map((file) => file.filename);
+        history.push({
+          headSha: head.sha.slice(0, 7),
+          baseSha: base.sha.slice(0, 7),
+          removedFiles,
+        });
+      }
+      historyReport = buildHistoryReport({
+        baseBranch,
+        history,
+        comparedCount: compareCount,
+        totalPairs,
+      });
+      if (totalPairs > compareCount) {
+        historyReport += `\nNote: History comparisons capped at ${MAX_HISTORY_COMPARES} pairs.`;
+      }
+    }
 
     const report = buildReport({
       repo,
@@ -125,6 +208,7 @@ module.exports = async (req, res) => {
       baseOnly,
       featureOnly,
       count,
+      historyReport,
     });
 
     res.status(200).send(report);
