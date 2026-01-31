@@ -66,6 +66,21 @@ async function fetchCompare({ repo, base, head, token }) {
   return response.json();
 }
 
+function summarizePatch(patch) {
+  if (!patch) {
+    return { added: 0, removed: 0, hasPatch: false };
+  }
+  const lines = patch.split('\n');
+  let added = 0;
+  let removed = 0;
+  for (const line of lines) {
+    if (line.startsWith('+++') || line.startsWith('---')) continue;
+    if (line.startsWith('+')) added += 1;
+    if (line.startsWith('-')) removed += 1;
+  }
+  return { added, removed, hasPatch: true };
+}
+
 function formatCommit(commit) {
   const sha = commit.sha?.slice(0, 7) || 'unknown';
   const message = commit.commit?.message?.split('\n')[0] || 'no message';
@@ -86,18 +101,32 @@ function buildHistoryReport({ baseBranch, history, comparedCount, totalPairs }) 
   }
   history.forEach((entry) => {
     lines.push(`Pair: ${entry.headSha} -> ${entry.baseSha}`);
-    if (entry.removedFiles.length === 0) {
-      lines.push('- No removed files detected.');
+    if (entry.removedFiles.length === 0 && entry.removedLines === 0) {
+      lines.push('- No removals detected.');
     } else {
-      lines.push('- Removed files:');
-      entry.removedFiles.forEach((file) => lines.push(`  - ${file}`));
+      if (entry.removedFiles.length > 0) {
+        lines.push('- Removed files:');
+        entry.removedFiles.forEach((file) => lines.push(`  - ${file}`));
+      }
+      if (entry.removedLines > 0) {
+        lines.push(`- Lines removed (patch-based): ${entry.removedLines}`);
+      }
     }
     lines.push('');
   });
   return lines.join('\n');
 }
 
-function buildReport({ repo, featureBranch, baseBranch, baseOnly, featureOnly, count, historyReport }) {
+function buildReport({
+  repo,
+  featureBranch,
+  baseBranch,
+  baseOnly,
+  featureOnly,
+  count,
+  historyReport,
+  diffSummary,
+}) {
   const lines = [];
   lines.push('COMMIT AUDIT REPORT');
   lines.push('');
@@ -118,6 +147,25 @@ function buildReport({ repo, featureBranch, baseBranch, baseOnly, featureOnly, c
     lines.push('- None');
   } else {
     featureOnly.forEach((commit) => lines.push(`- ${formatCommit(commit)}`));
+  }
+  if (diffSummary) {
+    lines.push('');
+    lines.push('---');
+    lines.push('');
+    lines.push('Branch Diff Summary (content-level)');
+    lines.push(`Files changed: ${diffSummary.filesChanged}`);
+    if (diffSummary.removedFiles.length > 0) {
+      lines.push('Files removed in feature vs base:');
+      diffSummary.removedFiles.forEach((file) => lines.push(`- ${file}`));
+    } else {
+      lines.push('Files removed in feature vs base: None');
+    }
+    lines.push(
+      `Total lines added/removed (patch-based): +${diffSummary.linesAdded} / -${diffSummary.linesRemoved}`
+    );
+    if (diffSummary.truncatedPatches > 0) {
+      lines.push(`Note: ${diffSummary.truncatedPatches} file(s) missing patch data.`);
+    }
   }
   if (historyReport) {
     lines.push('');
@@ -171,6 +219,39 @@ module.exports = async (req, res) => {
     const baseOnly = baseCommits.filter((commit) => !featureSet.has(commit.sha));
     const featureOnly = featureCommits.filter((commit) => !baseSet.has(commit.sha));
 
+    const diffSummary = featureBranch
+      ? (() => {
+          const summary = {
+            filesChanged: 0,
+            removedFiles: [],
+            linesAdded: 0,
+            linesRemoved: 0,
+            truncatedPatches: 0,
+          };
+          return summary;
+        })()
+      : null;
+
+    if (featureBranch) {
+      const compare = await fetchCompare({
+        repo,
+        base: baseBranch,
+        head: featureBranch,
+        token,
+      });
+      const files = Array.isArray(compare.files) ? compare.files : [];
+      diffSummary.filesChanged = files.length;
+      for (const file of files) {
+        if (file.status === 'removed') {
+          diffSummary.removedFiles.push(file.filename);
+        }
+        const stats = summarizePatch(file.patch);
+        diffSummary.linesAdded += stats.added;
+        diffSummary.linesRemoved += stats.removed;
+        if (!stats.hasPatch) diffSummary.truncatedPatches += 1;
+      }
+    }
+
     let historyReport = '';
     if (includeHistory) {
       const history = [];
@@ -185,13 +266,19 @@ module.exports = async (req, res) => {
           head: head.sha,
           token,
         });
+        let removedLines = 0;
         const removedFiles = (compare.files || [])
           .filter((file) => file.status === 'removed')
           .map((file) => file.filename);
+        for (const file of compare.files || []) {
+          const stats = summarizePatch(file.patch);
+          removedLines += stats.removed;
+        }
         history.push({
           headSha: head.sha.slice(0, 7),
           baseSha: base.sha.slice(0, 7),
           removedFiles,
+          removedLines,
         });
       }
       historyReport = buildHistoryReport({
@@ -213,6 +300,7 @@ module.exports = async (req, res) => {
       featureOnly,
       count,
       historyReport,
+      diffSummary,
     });
 
     res.status(200).send(report);
