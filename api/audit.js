@@ -2,6 +2,22 @@ const DEFAULT_COMMIT_COUNT = 100;
 const MAX_COMMITS = 200;
 const MAX_HISTORY_COMPARES = 30;
 const MAX_FILES_PER_SECTION = 25;
+const HIGH_RISK_PATH_HINTS = [
+  '/api/',
+  '/auth',
+  '/billing',
+  '/payments',
+  '/scheduler',
+  '/sync',
+  '/db',
+  '/migrations',
+  '/security',
+  '/permissions',
+  '/upload',
+  '/encryption',
+  'schema.prisma',
+];
+const HIGH_REMOVAL_LINES = 50;
 
 function normalizeRepo(input) {
   if (!input) return null;
@@ -93,6 +109,34 @@ function getFileStats(file) {
   };
 }
 
+function getRiskTagsForFile(file) {
+  const tags = new Set();
+  const name = file.filename.toLowerCase();
+  for (const hint of HIGH_RISK_PATH_HINTS) {
+    if (name.includes(hint)) {
+      tags.add(hint);
+    }
+  }
+  if (file.deletions >= HIGH_REMOVAL_LINES && file.additions <= 10) {
+    tags.add('large-removal');
+  }
+  if (file.deletions > 0 && file.additions === 0) {
+    tags.add('deletion-only');
+  }
+  return Array.from(tags);
+}
+
+function getRiskSummary(files) {
+  const risky = [];
+  for (const file of files) {
+    const tags = getRiskTagsForFile(file);
+    if (tags.length > 0) {
+      risky.push({ file, tags });
+    }
+  }
+  return risky;
+}
+
 function formatCommit(commit) {
   const sha = commit.sha?.slice(0, 7) || 'unknown';
   const message = commit.commit?.message?.split('\n')[0] || 'no message';
@@ -132,6 +176,16 @@ function buildHistoryReport({ baseBranch, history, comparedCount, totalPairs }) 
           lines.push(`  - ${file.filename} (-${file.deletions}, +${file.additions})`)
         );
         if (entry.topRemovedFilesTruncated) {
+          lines.push(`  - ...and more (showing top ${MAX_FILES_PER_SECTION})`);
+        }
+      }
+      if (entry.riskyFiles.length > 0) {
+        lines.push('- High-risk removals:');
+        entry.riskyFiles.forEach((item) => {
+          const tagList = item.tags.join(', ');
+          lines.push(`  - ${item.file.filename} (-${item.file.deletions}, +${item.file.additions}) [${tagList}]`);
+        });
+        if (entry.riskyFilesTruncated) {
           lines.push(`  - ...and more (showing top ${MAX_FILES_PER_SECTION})`);
         }
       }
@@ -197,6 +251,16 @@ function buildReport({
         lines.push(`- ${file.filename} (${file.status}, +${file.additions}/-${file.deletions})`)
       );
       if (diffSummary.topChangedFilesTruncated) {
+        lines.push(`- ...and more (showing top ${MAX_FILES_PER_SECTION})`);
+      }
+    }
+    if (diffSummary.riskyFiles.length > 0) {
+      lines.push('High-risk changes:');
+      diffSummary.riskyFiles.forEach((item) => {
+        const tagList = item.tags.join(', ');
+        lines.push(`- ${item.file.filename} (+${item.file.additions}/-${item.file.deletions}) [${tagList}]`);
+      });
+      if (diffSummary.riskyFilesTruncated) {
         lines.push(`- ...and more (showing top ${MAX_FILES_PER_SECTION})`);
       }
     }
@@ -274,6 +338,8 @@ module.exports = async (req, res) => {
             compareUrl: '',
             topChangedFiles: [],
             topChangedFilesTruncated: false,
+            riskyFiles: [],
+            riskyFilesTruncated: false,
           };
           return summary;
         })()
@@ -293,6 +359,9 @@ module.exports = async (req, res) => {
       fileStats.sort((a, b) => (b.additions + b.deletions) - (a.additions + a.deletions));
       diffSummary.topChangedFiles = fileStats.slice(0, MAX_FILES_PER_SECTION);
       diffSummary.topChangedFilesTruncated = fileStats.length > MAX_FILES_PER_SECTION;
+      const risky = getRiskSummary(fileStats);
+      diffSummary.riskyFiles = risky.slice(0, MAX_FILES_PER_SECTION);
+      diffSummary.riskyFilesTruncated = risky.length > MAX_FILES_PER_SECTION;
       for (const file of files) {
         if (file.status === 'removed') {
           diffSummary.removedFiles.push(file.filename);
@@ -330,6 +399,7 @@ module.exports = async (req, res) => {
         const topRemoved = fileStats
           .filter((file) => file.deletions > 0)
           .sort((a, b) => b.deletions - a.deletions);
+        const risky = getRiskSummary(fileStats);
         history.push({
           headSha: head.sha.slice(0, 7),
           baseSha: base.sha.slice(0, 7),
@@ -338,6 +408,8 @@ module.exports = async (req, res) => {
           compareUrl: compare.html_url || '',
           topRemovedFiles: topRemoved.slice(0, MAX_FILES_PER_SECTION),
           topRemovedFilesTruncated: topRemoved.length > MAX_FILES_PER_SECTION,
+          riskyFiles: risky.slice(0, MAX_FILES_PER_SECTION),
+          riskyFilesTruncated: risky.length > MAX_FILES_PER_SECTION,
         });
       }
       historyReport = buildHistoryReport({
