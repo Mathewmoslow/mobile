@@ -1,6 +1,7 @@
 const DEFAULT_COMMIT_COUNT = 100;
 const MAX_COMMITS = 200;
 const MAX_HISTORY_COMPARES = 30;
+const MAX_FILES_PER_SECTION = 25;
 
 function normalizeRepo(input) {
   if (!input) return null;
@@ -81,6 +82,17 @@ function summarizePatch(patch) {
   return { added, removed, hasPatch: true };
 }
 
+function getFileStats(file) {
+  const additions = Number.isFinite(Number(file.additions)) ? Number(file.additions) : 0;
+  const deletions = Number.isFinite(Number(file.deletions)) ? Number(file.deletions) : 0;
+  return {
+    filename: file.filename,
+    status: file.status,
+    additions,
+    deletions,
+  };
+}
+
 function formatCommit(commit) {
   const sha = commit.sha?.slice(0, 7) || 'unknown';
   const message = commit.commit?.message?.split('\n')[0] || 'no message';
@@ -101,6 +113,9 @@ function buildHistoryReport({ baseBranch, history, comparedCount, totalPairs }) 
   }
   history.forEach((entry) => {
     lines.push(`Pair: ${entry.headSha} -> ${entry.baseSha}`);
+    if (entry.compareUrl) {
+      lines.push(`Compare: ${entry.compareUrl}`);
+    }
     if (entry.removedFiles.length === 0 && entry.removedLines === 0) {
       lines.push('- No removals detected.');
     } else {
@@ -110,6 +125,15 @@ function buildHistoryReport({ baseBranch, history, comparedCount, totalPairs }) 
       }
       if (entry.removedLines > 0) {
         lines.push(`- Lines removed (patch-based): ${entry.removedLines}`);
+      }
+      if (entry.topRemovedFiles.length > 0) {
+        lines.push('- Top files by deletions:');
+        entry.topRemovedFiles.forEach((file) =>
+          lines.push(`  - ${file.filename} (-${file.deletions}, +${file.additions})`)
+        );
+        if (entry.topRemovedFilesTruncated) {
+          lines.push(`  - ...and more (showing top ${MAX_FILES_PER_SECTION})`);
+        }
       }
     }
     lines.push('');
@@ -126,6 +150,7 @@ function buildReport({
   count,
   historyReport,
   diffSummary,
+  actionPlan,
 }) {
   const lines = [];
   lines.push('COMMIT AUDIT REPORT');
@@ -153,6 +178,9 @@ function buildReport({
     lines.push('---');
     lines.push('');
     lines.push('Branch Diff Summary (content-level)');
+    if (diffSummary.compareUrl) {
+      lines.push(`Compare: ${diffSummary.compareUrl}`);
+    }
     lines.push(`Files changed: ${diffSummary.filesChanged}`);
     if (diffSummary.removedFiles.length > 0) {
       lines.push('Files removed in feature vs base:');
@@ -163,6 +191,15 @@ function buildReport({
     lines.push(
       `Total lines added/removed (patch-based): +${diffSummary.linesAdded} / -${diffSummary.linesRemoved}`
     );
+    if (diffSummary.topChangedFiles.length > 0) {
+      lines.push('Top files by change size:');
+      diffSummary.topChangedFiles.forEach((file) =>
+        lines.push(`- ${file.filename} (${file.status}, +${file.additions}/-${file.deletions})`)
+      );
+      if (diffSummary.topChangedFilesTruncated) {
+        lines.push(`- ...and more (showing top ${MAX_FILES_PER_SECTION})`);
+      }
+    }
     if (diffSummary.truncatedPatches > 0) {
       lines.push(`Note: ${diffSummary.truncatedPatches} file(s) missing patch data.`);
     }
@@ -172,6 +209,13 @@ function buildReport({
     lines.push('---');
     lines.push('');
     lines.push(historyReport);
+  }
+  if (actionPlan) {
+    lines.push('');
+    lines.push('---');
+    lines.push('');
+    lines.push('Action Plan');
+    actionPlan.forEach((step, index) => lines.push(`${index + 1}. ${step}`));
   }
   return lines.join('\n');
 }
@@ -227,6 +271,9 @@ module.exports = async (req, res) => {
             linesAdded: 0,
             linesRemoved: 0,
             truncatedPatches: 0,
+            compareUrl: '',
+            topChangedFiles: [],
+            topChangedFilesTruncated: false,
           };
           return summary;
         })()
@@ -241,6 +288,11 @@ module.exports = async (req, res) => {
       });
       const files = Array.isArray(compare.files) ? compare.files : [];
       diffSummary.filesChanged = files.length;
+      diffSummary.compareUrl = compare.html_url || '';
+      const fileStats = files.map(getFileStats);
+      fileStats.sort((a, b) => (b.additions + b.deletions) - (a.additions + a.deletions));
+      diffSummary.topChangedFiles = fileStats.slice(0, MAX_FILES_PER_SECTION);
+      diffSummary.topChangedFilesTruncated = fileStats.length > MAX_FILES_PER_SECTION;
       for (const file of files) {
         if (file.status === 'removed') {
           diffSummary.removedFiles.push(file.filename);
@@ -270,15 +322,22 @@ module.exports = async (req, res) => {
         const removedFiles = (compare.files || [])
           .filter((file) => file.status === 'removed')
           .map((file) => file.filename);
+        const fileStats = (compare.files || []).map(getFileStats);
         for (const file of compare.files || []) {
           const stats = summarizePatch(file.patch);
           removedLines += stats.removed;
         }
+        const topRemoved = fileStats
+          .filter((file) => file.deletions > 0)
+          .sort((a, b) => b.deletions - a.deletions);
         history.push({
           headSha: head.sha.slice(0, 7),
           baseSha: base.sha.slice(0, 7),
           removedFiles,
           removedLines,
+          compareUrl: compare.html_url || '',
+          topRemovedFiles: topRemoved.slice(0, MAX_FILES_PER_SECTION),
+          topRemovedFilesTruncated: topRemoved.length > MAX_FILES_PER_SECTION,
         });
       }
       historyReport = buildHistoryReport({
@@ -292,6 +351,28 @@ module.exports = async (req, res) => {
       }
     }
 
+    const actionPlan = [];
+    if (baseOnly.length > 0) {
+      actionPlan.push(
+        'Review the commits missing from the feature branch and decide whether to cherry-pick or merge them.'
+      );
+    }
+    if (featureOnly.length > 0) {
+      actionPlan.push(
+        'Review the feature-only commits and decide whether they should be merged into main.'
+      );
+    }
+    if (diffSummary && diffSummary.filesChanged > 0) {
+      actionPlan.push(
+        'Inspect the branch compare link and validate large deletions or file removals against requirements.'
+      );
+    }
+    if (includeHistory) {
+      actionPlan.push(
+        'Inspect the main history compare links with high deletion counts to confirm removals were requested.'
+      );
+    }
+
     const report = buildReport({
       repo,
       featureBranch,
@@ -301,6 +382,7 @@ module.exports = async (req, res) => {
       count,
       historyReport,
       diffSummary,
+      actionPlan,
     });
 
     res.status(200).send(report);
