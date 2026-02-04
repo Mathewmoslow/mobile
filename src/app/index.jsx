@@ -12,6 +12,7 @@ import {
 
 const DEFAULT_BASE_BRANCH = 'main';
 const DEFAULT_COMMIT_COUNT = '100';
+const DEFAULT_WATCHLIST = '';
 
 const DECISIONS = ['Keep', 'Restore', 'Investigate'];
 
@@ -21,6 +22,7 @@ export default function Index() {
   const [baseBranch, setBaseBranch] = useState(DEFAULT_BASE_BRANCH);
   const [commitCount, setCommitCount] = useState(DEFAULT_COMMIT_COUNT);
   const [includeHistory, setIncludeHistory] = useState(true);
+  const [watchlist, setWatchlist] = useState(DEFAULT_WATCHLIST);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState('');
   const [report, setReport] = useState('');
@@ -28,8 +30,12 @@ export default function Index() {
 
   const auditApiUrl = process.env.EXPO_PUBLIC_AUDIT_API_URL;
   const isFormValid = useMemo(() => {
-    return repoPath.trim().length > 0 && featureBranch.trim().length > 0 && commitCount.trim().length > 0;
-  }, [repoPath, featureBranch, commitCount]);
+    const hasRepo = repoPath.trim().length > 0;
+    const hasCommitCount = commitCount.trim().length > 0;
+    const hasFeatureBranch = featureBranch.trim().length > 0;
+    const hasWatchlist = watchlist.trim().length > 0;
+    return hasRepo && hasCommitCount && (hasFeatureBranch || hasWatchlist);
+  }, [repoPath, featureBranch, commitCount, watchlist]);
 
   const parsedReport = useMemo(() => parseReport(report), [report]);
 
@@ -54,6 +60,7 @@ export default function Index() {
         missingFromFeature: [],
         onlyOnFeature: [],
         historyPairs: [],
+        watchlist: [],
       },
     };
     parsedReport.missingFromFeature.forEach((item) => {
@@ -68,6 +75,10 @@ export default function Index() {
       const decision = decisions.historyPairs?.[item.id] || 'Unassigned';
       plan.decisions.historyPairs.push({ ...item, decision });
     });
+    parsedReport.watchlist.forEach((item) => {
+      const decision = decisions.watchlist?.[item.id] || 'Unassigned';
+      plan.decisions.watchlist.push({ ...item, decision });
+    });
     return JSON.stringify(plan, null, 2);
   }, [parsedReport, decisions]);
 
@@ -79,7 +90,7 @@ export default function Index() {
       return;
     }
     if (!isFormValid) {
-      setError('Please fill out repo path, feature branch, and commit count.');
+      setError('Please fill out repo path, commit count, and either feature branch or watchlist.');
       return;
     }
     setIsSubmitting(true);
@@ -93,6 +104,7 @@ export default function Index() {
           baseBranch: baseBranch.trim() || DEFAULT_BASE_BRANCH,
           commitCount: Number.parseInt(commitCount, 10),
           includeHistory,
+          watchlist,
         }),
       });
       const text = await response.text();
@@ -160,6 +172,20 @@ export default function Index() {
             keyboardType="number-pad"
             style={styles.input}
           />
+        </View>
+
+        <View style={styles.field}>
+          <Text style={styles.label}>Regression watchlist (commit SHAs)</Text>
+          <TextInput
+            value={watchlist}
+            onChangeText={setWatchlist}
+            placeholder="one SHA per line"
+            autoCapitalize="none"
+            autoCorrect={false}
+            multiline
+            style={[styles.input, styles.textarea]}
+          />
+          <Text style={styles.helperText}>Auditor checks if these commits regressed on the base branch.</Text>
         </View>
 
         <TouchableOpacity
@@ -230,6 +256,23 @@ export default function Index() {
                     decision={decisions.historyPairs?.[item.id]}
                     onDecision={(value) => setDecision('historyPairs', item.id, value)}
                     tagList={item.riskTags}
+                  />
+                ))
+              )}
+            </Section>
+
+            <Section title="Regression watchlist">
+              {parsedReport.watchlist.length === 0 ? (
+                <Text style={styles.emptyText}>No watchlist results.</Text>
+              ) : (
+                parsedReport.watchlist.map((item) => (
+                  <AuditCard
+                    key={item.id}
+                    title={`${item.sha} ${item.message}`}
+                    subtitle={`Status: ${item.status} • In base: ${item.inBaseHistory}`}
+                    details={item.details}
+                    decision={decisions.watchlist?.[item.id]}
+                    onDecision={(value) => setDecision('watchlist', item.id, value)}
                   />
                 ))
               )}
@@ -314,9 +357,11 @@ function parseReport(text) {
     missingFromFeature: [],
     onlyOnFeature: [],
     historyPairs: [],
+    watchlist: [],
   };
   let section = '';
   let currentPair = null;
+  let currentWatch = null;
   for (let i = 0; i < lines.length; i += 1) {
     const line = lines[i].trim();
     if (line.startsWith('Repo:')) {
@@ -331,6 +376,8 @@ function parseReport(text) {
       section = 'featureOnly';
     } else if (line.startsWith('Main Branch History Audit')) {
       section = 'history';
+    } else if (line.startsWith('Regression Watchlist Audit')) {
+      section = 'watchlist';
     } else if (line.startsWith('Pair:')) {
       const match = line.match(/Pair:\s+(\w+)\s+->\s+(\w+)/);
       currentPair = match
@@ -345,6 +392,29 @@ function parseReport(text) {
         : null;
       if (currentPair) {
         result.historyPairs.push(currentPair);
+      }
+    } else if (line.startsWith('Commit:')) {
+      const match = line.match(/^Commit:\s+(\w+)\s+(.*)$/);
+      currentWatch = match
+        ? {
+            id: match[1],
+            sha: match[1],
+            message: match[2],
+            status: 'unknown',
+            inBaseHistory: 'unknown',
+            details: [],
+          }
+        : null;
+      if (currentWatch) {
+        result.watchlist.push(currentWatch);
+      }
+    } else if (line.startsWith('Status:') && currentWatch) {
+      currentWatch.status = line.replace('Status:', '').trim();
+    } else if (line.startsWith('In base history:') && currentWatch) {
+      currentWatch.inBaseHistory = line.replace('In base history:', '').trim();
+    } else if (section === 'watchlist' && currentWatch && line.length > 0) {
+      if (!line.startsWith('Regression Watchlist Audit')) {
+        currentWatch.details.push(line);
       }
     } else if (line.startsWith('Compare:') && currentPair) {
       currentPair.compareUrl = line.replace('Compare:', '').trim();
@@ -418,6 +488,14 @@ const styles = StyleSheet.create({
     paddingVertical: 10,
     fontSize: 14,
     backgroundColor: '#fafafa',
+  },
+  textarea: {
+    minHeight: 90,
+    textAlignVertical: 'top',
+  },
+  helperText: {
+    fontSize: 12,
+    color: '#666',
   },
   toggleRow: {
     flexDirection: 'row',

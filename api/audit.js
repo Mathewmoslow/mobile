@@ -2,6 +2,9 @@ const DEFAULT_COMMIT_COUNT = 100;
 const MAX_COMMITS = 200;
 const MAX_HISTORY_COMPARES = 30;
 const MAX_FILES_PER_SECTION = 25;
+const MAX_WATCH_COMMITS = 25;
+const MAX_WATCH_FILES = 12;
+const MAX_WATCH_LINES = 20;
 const HIGH_RISK_PATH_HINTS = [
   '/api/',
   '/auth',
@@ -30,6 +33,38 @@ function normalizeRepo(input) {
     return trimmed;
   }
   return null;
+}
+
+async function fetchCommitDetails({ repo, sha, token }) {
+  const url = `https://api.github.com/repos/${repo}/commits/${encodeURIComponent(sha)}`;
+  const response = await fetch(url, {
+    headers: {
+      Accept: 'application/vnd.github+json',
+      Authorization: `Bearer ${token}`,
+      'User-Agent': 'vercel-audit-endpoint',
+    },
+  });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`GitHub commit error (${response.status}): ${text}`);
+  }
+  return response.json();
+}
+
+async function fetchFileContent({ repo, path, ref, token }) {
+  const url = `https://api.github.com/repos/${repo}/contents/${encodeURIComponent(path)}?ref=${encodeURIComponent(ref)}`;
+  const response = await fetch(url, {
+    headers: {
+      Accept: 'application/vnd.github.raw',
+      Authorization: `Bearer ${token}`,
+      'User-Agent': 'vercel-audit-endpoint',
+    },
+  });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`GitHub content error (${response.status}): ${text}`);
+  }
+  return response.text();
 }
 
 async function fetchCommits({ repo, branch, perPage, token }) {
@@ -96,6 +131,28 @@ function summarizePatch(patch) {
     if (line.startsWith('-')) removed += 1;
   }
   return { added, removed, hasPatch: true };
+}
+
+function extractPatchLines(patch) {
+  const added = [];
+  const removed = [];
+  if (!patch) {
+    return { added, removed, hasPatch: false };
+  }
+  const lines = patch.split('\n');
+  for (const line of lines) {
+    if (line.startsWith('+++') || line.startsWith('---')) continue;
+    if (line.startsWith('+')) added.push(line.slice(1));
+    if (line.startsWith('-')) removed.push(line.slice(1));
+  }
+  return { added, removed, hasPatch: true };
+}
+
+function normalizePatchLine(line) {
+  if (!line) return '';
+  const trimmed = line.trim();
+  if (trimmed.length < 3) return '';
+  return trimmed;
 }
 
 function getFileStats(file) {
@@ -195,6 +252,43 @@ function buildHistoryReport({ baseBranch, history, comparedCount, totalPairs }) 
   return lines.join('\n');
 }
 
+function buildWatchlistReport(entries) {
+  const lines = [];
+  lines.push('Regression Watchlist Audit');
+  if (!entries || entries.length === 0) {
+    lines.push('No watchlist entries provided.');
+    return lines.join('\n');
+  }
+  entries.forEach((entry) => {
+    lines.push(`Commit: ${entry.sha} ${entry.message}`);
+    lines.push(`Status: ${entry.status}`);
+    lines.push(`In base history: ${entry.inBaseHistory}`);
+    if (entry.note) {
+      lines.push(`Note: ${entry.note}`);
+    }
+    if (entry.files.length === 0) {
+      lines.push('No files evaluated.');
+    } else {
+      entry.files.forEach((file) => {
+        lines.push(`File: ${file.path} (${file.status})`);
+        if (file.reason) {
+          lines.push(`- Reason: ${file.reason}`);
+        }
+        if (file.missingAdded.length > 0) {
+          lines.push('- Missing added lines:');
+          file.missingAdded.forEach((line) => lines.push(`  - ${line}`));
+        }
+        if (file.removedStillPresent.length > 0) {
+          lines.push('- Removed lines still present:');
+          file.removedStillPresent.forEach((line) => lines.push(`  - ${line}`));
+        }
+      });
+    }
+    lines.push('');
+  });
+  return lines.join('\n');
+}
+
 function buildReport({
   repo,
   featureBranch,
@@ -203,6 +297,7 @@ function buildReport({
   featureOnly,
   count,
   historyReport,
+  watchlistReport,
   diffSummary,
   actionPlan,
 }) {
@@ -274,6 +369,12 @@ function buildReport({
     lines.push('');
     lines.push(historyReport);
   }
+  if (watchlistReport) {
+    lines.push('');
+    lines.push('---');
+    lines.push('');
+    lines.push(watchlistReport);
+  }
   if (actionPlan) {
     lines.push('');
     lines.push('---');
@@ -305,6 +406,11 @@ module.exports = async (req, res) => {
   const featureBranch = String(body.featureBranch || '').trim();
   const baseBranch = String(body.baseBranch || 'main').trim();
   const includeHistory = Boolean(body.includeHistory);
+  const watchlist = Array.isArray(body.watchlist)
+    ? body.watchlist
+    : typeof body.watchlist === 'string'
+      ? body.watchlist.split(/[\n,]+/).map((item) => item.trim()).filter(Boolean)
+      : [];
   const count = Math.min(
     MAX_COMMITS,
     Number.isFinite(Number(body.commitCount)) ? Number(body.commitCount) : DEFAULT_COMMIT_COUNT
@@ -423,6 +529,109 @@ module.exports = async (req, res) => {
       }
     }
 
+    const watchEntries = [];
+    if (watchlist.length > 0) {
+      const uniqueWatch = Array.from(new Set(watchlist)).slice(0, MAX_WATCH_COMMITS);
+      for (const sha of uniqueWatch) {
+        try {
+          const commit = await fetchCommitDetails({ repo, sha, token });
+          const message = commit.commit?.message?.split('\n')[0] || 'no message';
+          let inBaseHistory = 'unknown';
+          try {
+            const compare = await fetchCompare({ repo, base: sha, head: baseBranch, token });
+            if (compare.status === 'ahead' || compare.status === 'identical') {
+              inBaseHistory = 'yes';
+            } else if (compare.status === 'behind' || compare.status === 'diverged') {
+              inBaseHistory = 'no';
+            }
+          } catch (compareError) {
+            inBaseHistory = 'unknown';
+          }
+
+          const files = Array.isArray(commit.files) ? commit.files.slice(0, MAX_WATCH_FILES) : [];
+          const fileReports = [];
+          let entryStatus = 'ok';
+          for (const file of files) {
+            const { added, removed, hasPatch } = extractPatchLines(file.patch);
+            if (!hasPatch) {
+              fileReports.push({
+                path: file.filename,
+                status: 'unknown',
+                reason: 'Missing patch data from GitHub API.',
+                missingAdded: [],
+                removedStillPresent: [],
+              });
+              if (entryStatus === 'ok') entryStatus = 'unknown';
+              continue;
+            }
+
+            const addedLines = Array.from(
+              new Set(added.map(normalizePatchLine).filter(Boolean))
+            ).slice(0, MAX_WATCH_LINES);
+            const removedLines = Array.from(
+              new Set(removed.map(normalizePatchLine).filter(Boolean))
+            ).slice(0, MAX_WATCH_LINES);
+
+            let content = '';
+            try {
+              content = await fetchFileContent({
+                repo,
+                path: file.filename,
+                ref: baseBranch,
+                token,
+              });
+            } catch (contentError) {
+              fileReports.push({
+                path: file.filename,
+                status: 'unknown',
+                reason: 'Unable to fetch file content from GitHub API.',
+                missingAdded: [],
+                removedStillPresent: [],
+              });
+              if (entryStatus === 'ok') entryStatus = 'unknown';
+              continue;
+            }
+
+            const missingAdded = addedLines.filter((line) => !content.includes(line));
+            const removedStillPresent = removedLines.filter((line) => content.includes(line));
+            let fileStatus = 'ok';
+            if (missingAdded.length > 0 || removedStillPresent.length > 0) {
+              fileStatus = 'regression-risk';
+              entryStatus = 'regression-risk';
+            }
+            fileReports.push({
+              path: file.filename,
+              status: fileStatus,
+              reason: '',
+              missingAdded: missingAdded.slice(0, MAX_WATCH_LINES),
+              removedStillPresent: removedStillPresent.slice(0, MAX_WATCH_LINES),
+            });
+          }
+
+          watchEntries.push({
+            sha: commit.sha?.slice(0, 7) || sha.slice(0, 7),
+            message,
+            status: entryStatus,
+            inBaseHistory,
+            note: files.length < (commit.files || []).length
+              ? `Checked first ${files.length} files (cap ${MAX_WATCH_FILES}).`
+              : '',
+            files: fileReports,
+          });
+        } catch (error) {
+          watchEntries.push({
+            sha: sha.slice(0, 7),
+            message: 'Unable to load commit',
+            status: 'unknown',
+            inBaseHistory: 'unknown',
+            note: error instanceof Error ? error.message : String(error),
+            files: [],
+          });
+        }
+      }
+    }
+
+    const watchlistReport = buildWatchlistReport(watchEntries);
     const actionPlan = [];
     if (baseOnly.length > 0) {
       actionPlan.push(
@@ -444,6 +653,9 @@ module.exports = async (req, res) => {
         'Inspect the main history compare links with high deletion counts to confirm removals were requested.'
       );
     }
+    if (watchEntries.some((entry) => entry.status === 'regression-risk')) {
+      actionPlan.push('Investigate watchlist commits flagged as regression-risk and restore intended behavior.');
+    }
 
     const report = buildReport({
       repo,
@@ -453,6 +665,7 @@ module.exports = async (req, res) => {
       featureOnly,
       count,
       historyReport,
+      watchlistReport,
       diffSummary,
       actionPlan,
     });
